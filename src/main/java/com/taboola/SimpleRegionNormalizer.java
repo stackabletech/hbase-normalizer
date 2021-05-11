@@ -49,7 +49,6 @@ import org.apache.hadoop.hbase.master.normalizer.MergeNormalizationPlan;
 import org.apache.hadoop.hbase.master.normalizer.NormalizationPlan;
 import org.apache.hadoop.hbase.master.normalizer.RegionNormalizer;
 import org.apache.hadoop.hbase.master.normalizer.SplitNormalizationPlan;
-import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionInfo;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 
@@ -92,7 +91,7 @@ import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
  *    <li>System tables are skipped</li>
  *    <li>Splits get a higher priority than merges</li>
  *    <li>If a region is smaller than</li>
- *
+ *         TODO!!!
  *  <li> get all regions of a given table
  *  <li> get avg size S of each region (by total size of store files reported in RegionLoad)
  *  <li> If biggest region is bigger than S * 2, it is kindly requested to split,
@@ -121,11 +120,6 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
   private static final String NORMALIZER_TARGET_REGION_COUNT = "NORMALIZER_TARGET_REGION_COUNT";
   private static final String NORMALIZER_TARGET_REGION_SIZE = "NORMALIZER_TARGET_REGION_SIZE";
 
-  /**
-   * Set the master service.
-   *
-   * @param masterServices inject instance of MasterServices
-   */
   @Override
   public void setMasterServices(MasterServices masterServices) {
     this.masterServices = masterServices;
@@ -133,14 +127,6 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     normalizerConfiguration = new NormalizerConfiguration(masterServices.getConfiguration());
   }
 
-  /**
-   * Computes next most "urgent" normalization action on the table.
-   * Action may be either a split, or a merge, or no action.
-   *
-   * @param table table to normalize
-   *
-   * @return normalization plan to execute
-   */
   @Override
   public List<NormalizationPlan> computePlanForTable(TableName table) throws HBaseIOException {
     if (table == null) {
@@ -211,7 +197,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
   }
 
   private boolean isMasterSwitchEnabled(final MasterSwitchType masterSwitchType) {
-    // This is not exposed via MasterServices in HBase 1.x so this is potentially dangerous!
+    // This is not exposed via MasterServices in HBase 1.x so this cast is potentially dangerous! (e.g. in tests?)
     return ((HMaster) masterServices).isSplitOrMergeEnabled(masterSwitchType);
   }
 
@@ -259,7 +245,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
         logTraceReason(() -> !states.isRegionInRegionStates(regionInfo), "skipping split of region [" + name + "] because no state information is available.")
             || logTraceReason(() -> !states.isRegionInState(regionInfo, RegionState.State.OPEN), "skipping split of region [" + name + "] because it is not open.")
             || logTraceReason(() -> !isOldEnough(regionInfo, normalizerConfiguration.getSplitMinRegionAge(ctx)), "skipping split of region [" + name + "] because it is not old enough.")
-            || logTraceReason(() -> !isLargeEnoughForSplit(normalizerConfiguration, ctx, regionInfo), "skipping split region [" + name + "] because it is not large enough.");
+            || logTraceReason(() -> !isLargeEnough(normalizerConfiguration.getSplitMinRegionSizeMb(ctx), regionInfo), "skipping split region [" + name + "] because it is not large enough.");
   }
 
   /**
@@ -282,10 +268,6 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     LOG.debug("Computing normalization plan for table " + ctx.getTableName() + ". average region size: " + avgRegionSizeMb + " MB,"
         + " number of regions: " + tableRegions.size());
 
-    // this nested loop walks the table's region chain once, looking for contiguous sequences of
-    // regions that meet the criteria for merge. The outer loop tracks the starting point of the
-    // next sequence, the inner loop looks for the end of that sequence. A single sequence becomes
-    // an instance of MergeNormalizationPlan.
     List<NormalizationPlan> plans = new LinkedList<>();
     int candidateIdx = 0;
     while (candidateIdx < tableRegions.size()) {
@@ -322,10 +304,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
   }
 
   /**
-   * Determine if a {@link RegionInfo} should be considered for a merge operation.
-   * </p>
-   * Callers beware: for safe concurrency, be sure to pass in the local instance of
-   * {@link NormalizerConfiguration}, don't use {@code this}'s instance.
+   * Determine if a region should be considered for a merge operation.
    */
   @SuppressWarnings("TestOnlyProblems") // The required methods are only exposed in HBase 2 and up
   private boolean skipForMerge(
@@ -339,42 +318,19 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
         logTraceReason(() -> !states.isRegionInRegionStates(regionInfo), "skipping merge of region [" + name + "] because no state information is available.")
             || logTraceReason(() -> !states.isRegionInState(regionInfo, State.OPEN), "skipping merge of region [" + name + "] because it is not open.")
             || logTraceReason(() -> !isOldEnough(regionInfo, normalizerConfiguration.getMergeMinRegionAge(ctx)), "skipping merge of region [" + name + "] because it is not old enough.")
-            || logTraceReason(() -> !isLargeEnoughForMerge(normalizerConfiguration, ctx, regionInfo), "skipping merge region [" + name + "] because it is not large enough.");
+            || logTraceReason(() -> !isLargeEnough(normalizerConfiguration.getMergeMinRegionSizeMb(ctx), regionInfo), "skipping merge region [" + name + "] because it is not large enough.");
   }
 
-  /**
-   * Return {@code true} when {@code regionInfo} has a size that is sufficient
-   * to be considered for a merge operation, {@code false} otherwise.
-   * </p>
-   * Callers beware: for safe concurrency, be sure to pass in the local instance of
-   * {@link NormalizerConfiguration}, don't use {@code this}'s instance.
-   */
-  private boolean isLargeEnoughForMerge(
-      final NormalizerConfiguration normalizerConfiguration,
-      final NormalizeContext ctx,
-      final HRegionInfo regionInfo
-  ) {
-    return getRegionSizeMB(regionInfo) >= normalizerConfiguration.getMergeMinRegionSizeMb(ctx);
-  }
-
-  /**
-   * Return {@code true} when {@code regionInfo} has a size that is sufficient
-   * to be considered for a split operation, {@code false} otherwise.
-   * </p>
-   * Callers beware: for safe concurrency, be sure to pass in the local instance of
-   * {@link NormalizerConfiguration}, don't use {@code this}'s instance.
-   */
-  private boolean isLargeEnoughForSplit(
-      NormalizerConfiguration normalizerConfiguration,
-      NormalizeContext ctx,
+  private boolean isLargeEnough(
+      long minSize,
       HRegionInfo regionInfo
   ) {
-    return getRegionSizeMB(regionInfo) >= normalizerConfiguration.getSplitMinRegionSizeMb(ctx);
+    return getRegionSizeMB(regionInfo) >= minSize;
   }
 
   /**
    * Return {@code true} when {@code regionInfo} has a creation date that is old
-   * enough to be considered for a split operation, {@code false} otherwise.
+   * enough to be considered for a split or merge operation, {@code false} otherwise.
    */
   private static boolean isOldEnough(
       final HRegionInfo regionInfo,
@@ -421,8 +377,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
 
 
   /**
-   * Holds the configuration values read from {@link Configuration}. Encapsulation in a POJO
-   * enables atomic hot-reloading of configs without locks.
+   * Holds the configuration values read from {@link Configuration}.
+   * Encapsulation in a POJO enables atomic hot-reloading of configs without locks.
    */
   private static final class NormalizerConfiguration {
 
@@ -478,7 +434,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       splitEnabled = conf.getBoolean(SPLIT_ENABLED_KEY, DEFAULT_SPLIT_ENABLED);
       splitMinRegionAge = parsePeriod(conf, SPLIT_MIN_REGION_AGE_DAYS_KEY, DEFAULT_SPLIT_MIN_REGION_AGE_DAYS);
       splitMinRegionSizeMb = parseLong(conf, SPLIT_MIN_REGION_SIZE_MB_KEY, DEFAULT_SPLIT_MIN_REGION_SIZE_MB);
-      splitSizeMultiplier = parseDouble(conf, SPLIT_SIZE_MULTIPLIER_KEY, DEFAULT_SPLIT_SIZE_MULTIPLIER);
+      splitSizeMultiplier = parseSplitSizeMultiplier(conf);
 
       mergeEnabled = conf.getBoolean(MERGE_ENABLED_KEY, DEFAULT_MERGE_ENABLED);
       mergeMinRegionCount = parseMinRegionCount(conf);
@@ -572,8 +528,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return settledValue;
     }
 
-    private static double parseDouble(Configuration conf, String configKey, double defaultValue) {
-      double parsedValue = conf.getDouble(configKey, defaultValue);
+    private static double parseSplitSizeMultiplier(Configuration conf) {
+      double parsedValue = conf.getDouble(SPLIT_SIZE_MULTIPLIER_KEY, DEFAULT_SPLIT_SIZE_MULTIPLIER);
       return Math.max(0, parsedValue);
     }
 
@@ -610,7 +566,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       // This could result in normalizer merging non-adjacent regions into one and creates overlaps.
       // In order to avoid that, sort the list by RegionInfo.COMPARATOR.
       // See HBASE-24376
-      tableRegions.sort(COMPARATOR); // TODO
+      tableRegions.sort(COMPARATOR);
       averageRegionSizeMb = calculateAverageRegionSizeMb(tableRegions, this.tableDescriptor);
     }
 
