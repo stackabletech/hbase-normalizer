@@ -1,21 +1,32 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+/*
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
  */
 package com.taboola;
+
+import java.io.IOException;
+import java.time.Instant;
+import java.time.Period;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -41,18 +52,6 @@ import org.apache.hadoop.hbase.master.normalizer.SplitNormalizationPlan;
 import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionInfo;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-
-import java.io.IOException;
-import java.time.Instant;
-import java.time.Period;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Objects;
-import java.util.function.BooleanSupplier;
-import java.util.function.Function;
 
 
 import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
@@ -248,6 +247,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
   /**
    * Determine if a region should be considered for a split operation.
    */
+  @SuppressWarnings("TestOnlyProblems") // The required methods are only exposed in HBase 2 and up
   private boolean skipForSplit(
       NormalizerConfiguration normalizerConfiguration,
       NormalizeContext ctx,
@@ -258,7 +258,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     return
         logTraceReason(() -> !states.isRegionInRegionStates(regionInfo), "skipping split of region [" + name + "] because no state information is available.")
             || logTraceReason(() -> !states.isRegionInState(regionInfo, RegionState.State.OPEN), "skipping split of region [" + name + "] because it is not open.")
-            || logTraceReason(() -> !isOldEnough(normalizerConfiguration, ctx, regionInfo, normalizerConfiguration.getSplitMinRegionAge(ctx)), "skipping split of region [" + name + "] because it is not old enough.")
+            || logTraceReason(() -> !isOldEnough(regionInfo, normalizerConfiguration.getSplitMinRegionAge(ctx)), "skipping split of region [" + name + "] because it is not old enough.")
             || logTraceReason(() -> !isLargeEnoughForSplit(normalizerConfiguration, ctx, regionInfo), "skipping split region [" + name + "] because it is not large enough.");
   }
 
@@ -327,6 +327,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    * Callers beware: for safe concurrency, be sure to pass in the local instance of
    * {@link NormalizerConfiguration}, don't use {@code this}'s instance.
    */
+  @SuppressWarnings("TestOnlyProblems") // The required methods are only exposed in HBase 2 and up
   private boolean skipForMerge(
       final NormalizerConfiguration normalizerConfiguration,
       final NormalizeContext ctx,
@@ -337,7 +338,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     return
         logTraceReason(() -> !states.isRegionInRegionStates(regionInfo), "skipping merge of region [" + name + "] because no state information is available.")
             || logTraceReason(() -> !states.isRegionInState(regionInfo, State.OPEN), "skipping merge of region [" + name + "] because it is not open.")
-            || logTraceReason(() -> !isOldEnough(normalizerConfiguration, ctx, regionInfo, normalizerConfiguration.getMergeMinRegionAge(ctx)), "skipping merge of region [" + name + "] because it is not old enough.")
+            || logTraceReason(() -> !isOldEnough(regionInfo, normalizerConfiguration.getMergeMinRegionAge(ctx)), "skipping merge of region [" + name + "] because it is not old enough.")
             || logTraceReason(() -> !isLargeEnoughForMerge(normalizerConfiguration, ctx, regionInfo), "skipping merge region [" + name + "] because it is not large enough.");
   }
 
@@ -376,8 +377,6 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    * enough to be considered for a split operation, {@code false} otherwise.
    */
   private static boolean isOldEnough(
-      final NormalizerConfiguration normalizerConfiguration,
-      final NormalizeContext ctx,
       final HRegionInfo regionInfo,
       final Period minAge
   ) {
@@ -515,7 +514,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     private int getMergeMinRegionCount(NormalizeContext context) {
       int minRegionCount = context.getOrDefault(MERGE_MIN_REGION_COUNT_KEY, Integer::parseInt, 0);
       if (minRegionCount <= 0) {
-        minRegionCount = this.mergeMinRegionCount;
+        minRegionCount = mergeMinRegionCount;
       }
       return minRegionCount;
     }
@@ -583,20 +582,14 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       LOG.warn("Configured value [" + parsedValue + "] for key [" + key + "] is invalid. Setting value to [" + settledValue + "].");
     }
 
-    private static <T> void logConfigurationUpdated(final String key, final T oldValue, final T newValue) {
-      if (!Objects.equals(oldValue, newValue)) {
-        LOG.info("Updated configuration for key [ " + key + "] from [" + oldValue + "] to [" + newValue + "]");
-      }
-    }
-
   }
 
   /**
    * Inner class caries the state necessary to perform a single invocation of
-   * {@link #computePlanForTable(TableDescriptor)}. Grabbing this data from the assignment manager
+   * {@link #computePlanForTable(TableName)}. Grabbing this data from the assignment manager
    * up-front allows any computed values to be realized just once.
    */
-  private class NormalizeContext {
+  private final class NormalizeContext {
 
     private final TableName tableName;
     private final RegionStates regionStates;
@@ -618,7 +611,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       // In order to avoid that, sort the list by RegionInfo.COMPARATOR.
       // See HBASE-24376
       tableRegions.sort(COMPARATOR); // TODO
-      averageRegionSizeMb = calculateAverageRegionSizeMb(this.tableRegions, this.tableDescriptor);
+      averageRegionSizeMb = calculateAverageRegionSizeMb(tableRegions, this.tableDescriptor);
     }
 
     private TableName getTableName() {
