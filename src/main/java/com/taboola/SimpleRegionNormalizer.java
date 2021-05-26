@@ -480,7 +480,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     private long getMergeMinRegionSizeMb(NormalizeContext context) {
-      return getLong(context, MERGE_MIN_REGION_SIZE_MB_KEY, DEFAULT_MERGE_MIN_REGION_SIZE_MB);
+      return getLong(context, MERGE_MIN_REGION_SIZE_MB_KEY, mergeMinRegionSizeMb);
     }
 
 
