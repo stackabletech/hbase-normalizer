@@ -144,6 +144,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return Collections.emptyList();
     }
 
+    LOG.info("Taboola Normalizer running for table [" + table + "]");
+
     if (table.isSystemTable()) {
       LOG.debug("Normalization of system table [" + table + "] isn't allowed");
       return Collections.emptyList();
