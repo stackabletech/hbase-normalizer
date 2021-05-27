@@ -129,6 +129,11 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
 
   @Override
   public List<NormalizationPlan> computePlanForTable(TableName table) throws HBaseIOException {
+    if (masterServices == null) {
+      LOG.error("masterServices not initialized, this should not happen, aborting normalizer");
+      throw new HBaseIOException("masterServices not initialized");
+    }
+
     if (table == null) {
       return Collections.emptyList();
     }
@@ -137,6 +142,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     try {
       tableDescriptor = masterServices.getTableDescriptors().get(table);
     } catch (IOException e) {
+      LOG.error("Caught exception trying to get table descriptor for table [" + table + "]", e);
       throw new HBaseIOException(e);
     }
 
@@ -292,9 +298,10 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       long candidateRegion2Size = getRegionSizeMB(candidateRegion2);
 
       if (candidateRegion1Size + candidateRegion2Size < avgRegionSizeMb) {
-        LOG.info("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ")"
-            + "plus neighbor region [" + candidateRegion2.getEncodedName() + "] (size: " + candidateRegion2Size + ")"
-            + "are smaller than the average region size (" + avgRegionSizeMb + "), merging them");
+        LOG.info("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ") "
+            + "plus neighbor region [" + candidateRegion2.getEncodedName() + "] (size: " + candidateRegion2Size + ") "
+            + "are smaller than the average region size (" + avgRegionSizeMb + "), merging them: "
+            + (candidateRegion1Size + candidateRegion2Size) + " < " + avgRegionSizeMb);
         plans.add(new MergeNormalizationPlan(candidateRegion1, candidateRegion2));
         candidateIdx++; // Skips the next one because it's already part of the current plan
       }
@@ -606,8 +613,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       }
 
       TableName table = tableDescriptor.getTableName();
-      int targetRegionCount = getOrDefault(tableDescriptor.getValue(NORMALIZER_TARGET_REGION_COUNT), Integer::parseInt, -1);
-      long targetRegionSize = getOrDefault(tableDescriptor.getValue(NORMALIZER_TARGET_REGION_SIZE), Integer::parseInt, -1);
+      int targetRegionCount = getOrDefault(NORMALIZER_TARGET_REGION_COUNT, Integer::parseInt, -1);
+      long targetRegionSize = getOrDefault(NORMALIZER_TARGET_REGION_SIZE, Integer::parseInt, -1);
       LOG.debug("Table [" + table + "] configured with target region count " + targetRegionCount + ", target region size " + targetRegionSize + " MB");
 
       double avgRegionSize;
