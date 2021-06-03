@@ -151,6 +151,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     LOG.info("Taboola Normalizer running for table [" + table + "]");
+    LOG.trace("TableDescriptor for [" + table + "]: " + tableDescriptor);
 
     if (table.isSystemTable()) {
       LOG.debug("Normalization of system table [" + table + "] isn't allowed");
@@ -161,7 +162,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     boolean proceedWithMergePlanning = proceedWithMergePlanning(tableDescriptor);
 
     if (!proceedWithMergePlanning && !proceedWithSplitPlanning) {
-      LOG.debug("Both split and merge are disabled. Skipping normalization of table: " + table);
+      LOG.info("Both split and merge are disabled. Skipping normalization of table: " + table);
       return Collections.emptyList();
     }
 
@@ -186,8 +187,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       plans.addAll(mergePlans);
     }
 
-    LOG.debug("Computed normalization plans for table [" + table + "]."
-        + "Total plans: " + plans.size() + ","
+    LOG.info("Computed normalization plans for table [" + table + "]. "
+        + "Total plans: " + plans.size() + ", "
         + "split plans: " + splitPlansCount + ", merge plans: " + mergePlansCount);
     return plans;
   }
@@ -639,6 +640,11 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
 
     public <T> T getOrDefault(String key, Function<String, T> function, T defaultValue) {
       String value = tableDescriptor.getValue(key);
+      if (value != null) {
+        return function.apply(value);
+      }
+
+      value = tableDescriptor.getConfigurationValue(key);
       if (value == null) {
         return defaultValue;
       } else {
