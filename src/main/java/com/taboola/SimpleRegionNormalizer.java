@@ -307,6 +307,11 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
             + (candidateRegion1Size + candidateRegion2Size) + " < " + avgRegionSizeMb);
         plans.add(new MergeNormalizationPlan(candidateRegion1, candidateRegion2));
         candidateIdx++; // Skips the next one because it's already part of the current plan
+      } else {
+        LOG.info("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ") "
+            + "plus neighbor region [" + candidateRegion2.getEncodedName() + "] (size: " + candidateRegion2Size + ") "
+            + "are larger than (or equal to) the average region size (" + avgRegionSizeMb + "), NOT merging them: "
+            + (candidateRegion1Size + candidateRegion2Size) + " < " + avgRegionSizeMb);
       }
 
       candidateIdx++;
@@ -618,22 +623,25 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       TableName table = tableDescriptor.getTableName();
       int targetRegionCount = getOrDefault(NORMALIZER_TARGET_REGION_COUNT, Integer::parseInt, -1);
       long targetRegionSize = getOrDefault(NORMALIZER_TARGET_REGION_SIZE, Integer::parseInt, -1);
-      LOG.debug("Table [" + table + "] configured with target region count " + targetRegionCount + ", target region size " + targetRegionSize + " MB");
+      LOG.debug("Table [" + table + "] configured with target region count " + targetRegionCount + ", target region size " + targetRegionSize + " MB, if both are set only target region size will take effect");
 
-      double avgRegionSize;
+      int regionCount = tableRegions.size();
+      long totalSizeMb = tableRegions.stream()
+          .mapToLong(SimpleRegionNormalizer.this::getRegionSizeMB)
+          .sum();
+
+      double avgRegionSize = totalSizeMb / (double) regionCount;
+      LOG.debug("Table [" + table + "], total aggregated regions size: " + totalSizeMb + " MB and average region size " + String.format("%.3f", avgRegionSize) + " MB");
       if (targetRegionSize > 0) {
         avgRegionSize = targetRegionSize;
+        LOG.debug("Table [" + table + "], average region size adjusted to " + String.format("%.3f", avgRegionSize) + " MB to match target region size, will ignore target region count if also set");
       } else {
-        int regionCount = tableRegions.size();
-        long totalSizeMb = tableRegions.stream()
-            .mapToLong(SimpleRegionNormalizer.this::getRegionSizeMB)
-            .sum();
         if (targetRegionCount > 0) {
           avgRegionSize = totalSizeMb / (double) targetRegionCount;
+          LOG.debug("Table [" + table + "], average region size adjusted to " + String.format("%.3f", avgRegionSize) + " MB to match target region count of " + targetRegionCount);
         } else {
           avgRegionSize = totalSizeMb / (double) regionCount;
         }
-        LOG.debug("Table [" + table + "], total aggregated regions size: " + totalSizeMb + " MB and average region size " + String.format("%.3f", avgRegionSize) + " MB");
       }
 
       return avgRegionSize;
