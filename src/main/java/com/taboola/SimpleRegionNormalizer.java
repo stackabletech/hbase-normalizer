@@ -270,10 +270,12 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     long avgRegionSizeMb = (long) ctx.getAverageRegionSizeMb();
+    /*
     // TODO: Does this make sense?
     if (avgRegionSizeMb < normalizerConfiguration.getMergeMinRegionSizeMb(ctx)) {
       return Collections.emptyList();
     }
+     */
     LOG.debug("Computing normalization plan for table " + ctx.getTableName() + ". average region size: " + avgRegionSizeMb + " MB,"
         + " number of regions: " + tableRegions.size());
 
