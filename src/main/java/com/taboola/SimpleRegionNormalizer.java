@@ -231,9 +231,12 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
 
       long regionSizeMb = getRegionSizeMB(hri);
       if (regionSizeMb > (normalizerConfiguration.getSplitSizeMultiplier(ctx) * avgRegionSize)) {
-        LOG.info("Table [" + ctx.getTableName() + "], large region [" + hri.getRegionNameAsString() + "] has size " + regionSizeMb + " MB,"
-            + " more than " + normalizerConfiguration.getSplitSizeMultiplier(ctx) + " avg size " + String.format("%.3f", avgRegionSize) + " MB, splitting");
+        LOG.debug("Table [" + ctx.getTableName() + "], large region [" + hri.getRegionNameAsString() + "] has size " + regionSizeMb + " MB,"
+            + " more than " + normalizerConfiguration.getSplitSizeMultiplier(ctx) + " * avg size " + String.format("%.3f", avgRegionSize) + " MB, splitting");
         plans.add(new SplitNormalizationPlan(hri, null));
+      } else {
+        LOG.trace("Table [" + ctx.getTableName() + "], ,mregion [" + hri.getRegionNameAsString() + "] has size " + regionSizeMb + " MB,"
+            + " less than " + normalizerConfiguration.getSplitSizeMultiplier(ctx) + " * avg size " + String.format("%.3f", avgRegionSize) + " MB, NOT splitting");
       }
     }
     return plans;
@@ -269,15 +272,17 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return Collections.emptyList();
     }
 
-    long avgRegionSizeMb = (long) ctx.getAverageRegionSizeMb();
+    double originalAverageRegionSizeMb = ctx.getAverageRegionSizeMb();
+    double mergeSizeMultiplier = normalizerConfiguration.getMergeSizeMultiplier(ctx);
+    long avgRegionSizeMb = (long) (originalAverageRegionSizeMb * mergeSizeMultiplier);
     /*
     // TODO: Does this make sense?
     if (avgRegionSizeMb < normalizerConfiguration.getMergeMinRegionSizeMb(ctx)) {
       return Collections.emptyList();
     }
      */
-    LOG.debug("Computing normalization plan for table " + ctx.getTableName() + ". average region size: " + avgRegionSizeMb + " MB,"
-        + " number of regions: " + tableRegions.size());
+    LOG.debug("Computing normalization plan for table " + ctx.getTableName() + ". Average region size: " + originalAverageRegionSizeMb + " MB, using multiplier " + mergeSizeMultiplier
+        + " means we'll use an region size of " + avgRegionSizeMb + " for calculations, number of regions: " + tableRegions.size());
 
     List<NormalizationPlan> plans = new LinkedList<>();
     int candidateIdx = 0;
@@ -424,11 +429,15 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     private static final String MERGE_MIN_REGION_SIZE_MB_KEY = "hbase.normalizer.merge.min_region_size.mb";
     private static final int DEFAULT_MERGE_MIN_REGION_SIZE_MB = 0;
 
+    private static final String MERGE_SIZE_MULTIPLIER_KEY = "hbase.normalizer.merge.split.multiplier";
+    private static final double DEFAULT_MERGE_SIZE_MULTIPLIER = 1;
+
 
     private final boolean mergeEnabled;
     private final int mergeMinRegionCount;
     private final Period mergeMinRegionAge;
     private final long mergeMinRegionSizeMb;
+    private final double mergeSizeMultiplier;
 
     private final boolean splitEnabled;
     private final Period splitMinRegionAge;
@@ -445,18 +454,20 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       mergeMinRegionCount = DEFAULT_MERGE_MIN_REGION_COUNT;
       mergeMinRegionAge = Period.ofDays(DEFAULT_MERGE_MIN_REGION_AGE_DAYS);
       mergeMinRegionSizeMb = DEFAULT_MERGE_MIN_REGION_SIZE_MB;
+      mergeSizeMultiplier = DEFAULT_MERGE_SIZE_MULTIPLIER;
     }
 
     private NormalizerConfiguration(Configuration conf) {
       splitEnabled = conf.getBoolean(SPLIT_ENABLED_KEY, DEFAULT_SPLIT_ENABLED);
       splitMinRegionAge = parsePeriod(conf, SPLIT_MIN_REGION_AGE_DAYS_KEY, DEFAULT_SPLIT_MIN_REGION_AGE_DAYS);
       splitMinRegionSizeMb = parseLong(conf, SPLIT_MIN_REGION_SIZE_MB_KEY, DEFAULT_SPLIT_MIN_REGION_SIZE_MB);
-      splitSizeMultiplier = parseSplitSizeMultiplier(conf);
+      splitSizeMultiplier = parseDouble(conf, SPLIT_SIZE_MULTIPLIER_KEY, DEFAULT_SPLIT_SIZE_MULTIPLIER);
 
       mergeEnabled = conf.getBoolean(MERGE_ENABLED_KEY, DEFAULT_MERGE_ENABLED);
       mergeMinRegionCount = parseMinRegionCount(conf);
       mergeMinRegionAge = parsePeriod(conf, MERGE_MIN_REGION_AGE_DAYS_KEY, DEFAULT_MERGE_MIN_REGION_AGE_DAYS);
       mergeMinRegionSizeMb = parseLong(conf, MERGE_MIN_REGION_SIZE_MB_KEY, DEFAULT_MERGE_MIN_REGION_SIZE_MB);
+      mergeSizeMultiplier = parseDouble(conf, MERGE_SIZE_MULTIPLIER_KEY, DEFAULT_MERGE_SIZE_MULTIPLIER);
     }
 
     private boolean isSplitEnabled() {
@@ -490,6 +501,14 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
         minRegionCount = mergeMinRegionCount;
       }
       return minRegionCount;
+    }
+
+    private double getMergeSizeMultiplier(NormalizeContext context) {
+      double mergeSizeMultiplier = context.getOrDefault(MERGE_SIZE_MULTIPLIER_KEY, Double::parseDouble, -1.0d);
+      if (mergeSizeMultiplier < 0) {
+        mergeSizeMultiplier = this.mergeSizeMultiplier;
+      }
+      return mergeSizeMultiplier;
     }
 
     private Period getMergeMinRegionAge(NormalizeContext context) {
@@ -543,6 +562,11 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
         warnInvalidValue(configKey, parsedValue, settledValue);
       }
       return settledValue;
+    }
+
+    private static double parseDouble(Configuration conf, String configKey, double defaultValue) {
+      double parsedValue = conf.getDouble(configKey, defaultValue);
+      return Math.max(0, parsedValue);
     }
 
     private static double parseSplitSizeMultiplier(Configuration conf) {
