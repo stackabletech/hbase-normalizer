@@ -58,7 +58,7 @@ import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
 /**
  * Simple implementation of a region normalizer.
  *
- * It is a combination of the SimpleRegionNormalizer from CDH 5.16.2 and HBase commit 2b6a91a1dabcb90b085c522701bfb604a1473e30 (from 2021-05-10.
+ * It is a combination of the SimpleRegionNormalizer from CDH 5.16.2 and HBase commit 21aa553bc1d86f4d0d1dc7f47fcdcee49555e538 (from 2021-05-21).
  *
  * This normalizer can be configured by global settings in {@code hbase-site.xml} or per table using table properties.
  * Not all options can be set in both places.
@@ -66,7 +66,7 @@ import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
  * Generic options:
  * <ul>
  *   <li>{@code NORMALIZER_TARGET_REGION_COUNT} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards a target region count</li>
- *   <li>{@code NORMALIZER_TARGET_REGION_SIZE} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards an average target region size</li>
+ *   <li>{@code NORMALIZER_TARGET_REGION_SIZE} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards an average target region size (in MB)</li>
  * </ul>
  *
  * Configuration options related to splits:
@@ -102,7 +102,7 @@ import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
  * </ol>
  * <p>
  * Region sizes are coarse and approximate on the order of megabytes. Additionally,
- * "empty" regions (less than 1MB, with the previous note) are not merged away. This
+ * "empty" regions (less than 1 MB, with the previous note) are not merged away. This
  * is by design to prevent normalization from undoing the pre-splitting of a table.
  */
 @InterfaceAudience.Private
