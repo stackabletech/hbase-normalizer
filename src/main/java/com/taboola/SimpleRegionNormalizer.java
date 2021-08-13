@@ -18,6 +18,7 @@
 package com.taboola;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.Period;
 import java.util.ArrayList;
@@ -38,8 +39,15 @@ import org.apache.hadoop.hbase.RegionLoad;
 import org.apache.hadoop.hbase.ServerLoad;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Admin.MasterSwitchType;
+import org.apache.hadoop.hbase.client.ClusterConnection;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.HTableInterface;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.RegionState;
@@ -113,6 +121,11 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
   private MasterServices masterServices;
   private NormalizerConfiguration normalizerConfiguration = new NormalizerConfiguration();
 
+  private static final TableName PHOENIX_DEFAULT_CATALOG = TableName.valueOf("SYSTEM.CATALOG");
+  private static final TableName PHOENIX_NAMESPACED_CATALOG = TableName.valueOf("SYSTEM", "CATALOG");
+  private static final byte[] PHOENIX_CF_BYTES = "0".getBytes(StandardCharsets.UTF_8);
+  private static final byte[] PHOENIX_SALT_BUCKETS_BYTES = "SALT_BUCKETS".getBytes(StandardCharsets.UTF_8);
+
   private static final String SPLIT_ENABLED_KEY = "hbase.normalizer.split.enabled";
   private static final String MERGE_ENABLED_KEY = "hbase.normalizer.merge.enabled";
 
@@ -127,6 +140,81 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     normalizerConfiguration = new NormalizerConfiguration(masterServices.getConfiguration());
   }
 
+  /**
+   * Tries to find the HBase table for the Phoenix system catalog.
+   * If it can't find the correct one it'll return {@code null}.
+   */
+  private Table getPhoenixCatalogTable(Connection connection) throws HBaseIOException {
+    try {
+      return connection.getTable(PHOENIX_DEFAULT_CATALOG);
+    } catch (TableNotFoundException e) {
+      try {
+        return connection.getTable(PHOENIX_NAMESPACED_CATALOG);
+      } catch (TableNotFoundException ex) {
+        return null;
+      } catch (IOException ioException) {
+        throw new HBaseIOException(ioException);
+      }
+    } catch (IOException e) {
+      throw new HBaseIOException(e);
+    }
+  }
+
+  /**
+   * Will try to find the target table in the Phoenix catalog.
+   * It'll first try without a schema and then with a schema matching the namespace of the target table.
+   * Will return null if it can't find anything (not an empty result).
+   */
+  private Result tryFindTableInPhoenixCatalog(Table table, TableName tableName) throws HBaseIOException {
+    String target;
+    String targetName;
+    if (tableName.getNameAsString().equals("default")) {
+
+
+    }
+    if (tableName.getNameAsString().contains(".") {
+      tableName.getNameAsString().
+
+    }
+
+    try {
+      byte[] key = Bytes.add(new byte[] {0, 0}, tableName.getName());
+      Get get = new Get(key);
+      Result result = table.get(get);
+      if (result.isEmpty()) {
+        LOG.trace("Did NOT find information about the table [" + tableName + "] without a schema, trying again with schema matching namespace");
+        key = Bytes.add(Bytes.add(new byte[] {0}, tableName.getNamespace()), new byte[] {0}, tableName.getName());
+        get = new Get(key);
+        result = table.get(get);
+        if (result.isEmpty()) {
+          LOG.info("Did not find information about the table [" + tableName + "] in Phoenix");
+          return null;
+        } else {
+          return result;
+        }
+      } else {
+        return result;
+      }
+    } catch (IOException e) {
+      throw new HBaseIOException(e);
+    }
+  }
+
+
+  // Adapted from Phoenix
+  private static int decodeInt(byte[] bytes) throws HBaseIOException {
+    if (bytes.length < Bytes.SIZEOF_INT) {
+      throw new HBaseIOException("Data for SALT_BUCKETS column does not contain 4 bytes of data as required, it contains " + bytes.length + " bytes instead");
+    }
+    // Flip sign bit back
+    int v = bytes[0] ^ 0x80;
+    for (int i = 1; i < Bytes.SIZEOF_INT; i++) {
+      v = (v << 8) + (bytes[i] & 0xff);
+    }
+    return v;
+  }
+
+
   @Override
   public List<NormalizationPlan> computePlanForTable(TableName table) throws HBaseIOException {
     if (masterServices == null) {
@@ -139,6 +227,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     HTableDescriptor tableDescriptor;
+
     try {
       tableDescriptor = masterServices.getTableDescriptors().get(table);
     } catch (IOException e) {
@@ -163,8 +252,28 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       if (hasPhoenixCoprocessor) {
         LOG.info("Skipping normalizer for table [" + table + "] because it's a Phoenix table. This can be controlled using the property " + NormalizerConfiguration.NORMALIZER_SKIP_PHOENIX_TABLES);
         return Collections.emptyList();
+
       }
     }
+    ClusterConnection connection = masterServices.getConnection();
+    Table phoenixTable = getPhoenixCatalogTable(connection);
+    if (phoenixTable == null) {
+      LOG.warn("Could not find table for Phoenix catalog, will skip table without checking for SALT_BUCKETS, this should not happen and is probably a bug");
+      return Collections.emptyList();
+    }
+    Result result = tryFindTableInPhoenixCatalog(phoenixTable, table);
+    if (result == null) {
+      LOG.warn("Could not find table [" + table + "] in Phoenix catalog, will skip table anyway, this should not happen and is probably a bug");
+      return Collections.emptyList();
+    }
+    byte[] saltBucketBytes = result.getValue(PHOENIX_CF_BYTES, PHOENIX_SALT_BUCKETS_BYTES);
+    if (saltBucketBytes != null) {
+      int saltBuckets = decodeInt(saltBucketBytes);
+      LOG.info("Phoenix table [" + table + "] has " + saltBuckets + " salt buckets, will skip normalizing");
+      return Collections.emptyList()
+    }
+
+    // TODO: Table exists but no SALT_BUCKET
 
     boolean proceedWithSplitPlanning = proceedWithSplitPlanning(tableDescriptor);
     boolean proceedWithMergePlanning = proceedWithMergePlanning(tableDescriptor);
@@ -313,18 +422,18 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       long candidateRegion1Size = getRegionSizeMB(candidateRegion1);
       long candidateRegion2Size = getRegionSizeMB(candidateRegion2);
 
-      if (candidateRegion1Size + candidateRegion2Size < avgRegionSizeMb) {
-        LOG.info("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ") "
+      if ((candidateRegion1Size + candidateRegion2Size < avgRegionSizeMb) || (candidateRegion1Size + candidateRegion2Size < 1)) {
+        LOG.debug("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ") "
             + "plus neighbor region [" + candidateRegion2.getEncodedName() + "] (size: " + candidateRegion2Size + ") "
             + "are smaller than the average region size (" + avgRegionSizeMb + "), merging them: "
             + (candidateRegion1Size + candidateRegion2Size) + " < " + avgRegionSizeMb);
         plans.add(new MergeNormalizationPlan(candidateRegion1, candidateRegion2));
         candidateIdx++; // Skips the next one because it's already part of the current plan
       } else {
-        LOG.info("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ") "
+        LOG.trace("Table [" + ctx.getTableName() + "], region [" + candidateRegion1.getEncodedName() + "] (size: " + candidateRegion1Size + ") "
             + "plus neighbor region [" + candidateRegion2.getEncodedName() + "] (size: " + candidateRegion2Size + ") "
             + "are larger than (or equal to) the average region size (" + avgRegionSizeMb + "), NOT merging them: "
-            + (candidateRegion1Size + candidateRegion2Size) + " < " + avgRegionSizeMb);
+            + (candidateRegion1Size + candidateRegion2Size) + " > " + avgRegionSizeMb);
       }
 
       candidateIdx++;
