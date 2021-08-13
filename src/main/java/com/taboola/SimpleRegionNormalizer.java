@@ -158,6 +158,14 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return Collections.emptyList();
     }
 
+    if (normalizerConfiguration.isSkipPhoenixTables()) {
+      boolean hasPhoenixCoprocessor = tableDescriptor.getCoprocessors().stream().anyMatch(s -> s.contains("org.apache.phoenix.coprocessor"));
+      if (hasPhoenixCoprocessor) {
+        LOG.info("Skipping normalizer for table [" + table + "] because it's a Phoenix table. This can be controlled using the property " + NormalizerConfiguration.NORMALIZER_SKIP_PHOENIX_TABLES);
+        return Collections.emptyList();
+      }
+    }
+
     boolean proceedWithSplitPlanning = proceedWithSplitPlanning(tableDescriptor);
     boolean proceedWithMergePlanning = proceedWithMergePlanning(tableDescriptor);
 
@@ -404,6 +412,9 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    */
   private static final class NormalizerConfiguration {
 
+    public static final String NORMALIZER_SKIP_PHOENIX_TABLES = "hbase.normalizer.skip.phoenix.tables";
+    private static final boolean DEFAULT_NORMALIZER_SKIP_PHOENIX_TABLES = false;
+
     // SPLIT related options
     private static final boolean DEFAULT_SPLIT_ENABLED = true;
 
@@ -432,6 +443,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     private static final String MERGE_SIZE_MULTIPLIER_KEY = "hbase.normalizer.merge.split.multiplier";
     private static final double DEFAULT_MERGE_SIZE_MULTIPLIER = 1;
 
+    private final boolean skipPhoenixTables;
 
     private final boolean mergeEnabled;
     private final int mergeMinRegionCount;
@@ -445,6 +457,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     private final double splitSizeMultiplier;
 
     private NormalizerConfiguration() {
+      skipPhoenixTables = DEFAULT_NORMALIZER_SKIP_PHOENIX_TABLES;
+
       splitEnabled = DEFAULT_SPLIT_ENABLED;
       splitMinRegionAge = Period.ofDays(DEFAULT_SPLIT_MIN_REGION_AGE_DAYS);
       splitMinRegionSizeMb = DEFAULT_SPLIT_MIN_REGION_SIZE_MB;
@@ -458,6 +472,8 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     private NormalizerConfiguration(Configuration conf) {
+      skipPhoenixTables = conf.getBoolean(NORMALIZER_SKIP_PHOENIX_TABLES, DEFAULT_NORMALIZER_SKIP_PHOENIX_TABLES);
+
       splitEnabled = conf.getBoolean(SPLIT_ENABLED_KEY, DEFAULT_SPLIT_ENABLED);
       splitMinRegionAge = parsePeriod(conf, SPLIT_MIN_REGION_AGE_DAYS_KEY, DEFAULT_SPLIT_MIN_REGION_AGE_DAYS);
       splitMinRegionSizeMb = parseLong(conf, SPLIT_MIN_REGION_SIZE_MB_KEY, DEFAULT_SPLIT_MIN_REGION_SIZE_MB);
@@ -468,6 +484,10 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       mergeMinRegionAge = parsePeriod(conf, MERGE_MIN_REGION_AGE_DAYS_KEY, DEFAULT_MERGE_MIN_REGION_AGE_DAYS);
       mergeMinRegionSizeMb = parseLong(conf, MERGE_MIN_REGION_SIZE_MB_KEY, DEFAULT_MERGE_MIN_REGION_SIZE_MB);
       mergeSizeMultiplier = parseDouble(conf, MERGE_SIZE_MULTIPLIER_KEY, DEFAULT_MERGE_SIZE_MULTIPLIER);
+    }
+
+    private boolean isSkipPhoenixTables() {
+      return skipPhoenixTables;
     }
 
     private boolean isSplitEnabled() {
