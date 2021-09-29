@@ -243,7 +243,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
             + " more than " + normalizerConfiguration.getSplitSizeMultiplier(ctx) + " * avg size " + String.format("%.3f", avgRegionSize) + " MB, splitting");
         plans.add(new SplitNormalizationPlan(hri, null));
       } else {
-        LOG.trace("Table [" + ctx.getTableName() + "], ,mregion [" + hri.getRegionNameAsString() + "] has size " + regionSizeMb + " MB,"
+        LOG.trace("Table [" + ctx.getTableName() + "], region [" + hri.getRegionNameAsString() + "] has size " + regionSizeMb + " MB,"
             + " less than " + normalizerConfiguration.getSplitSizeMultiplier(ctx) + " * avg size " + String.format("%.3f", avgRegionSize) + " MB, NOT splitting");
       }
     }
