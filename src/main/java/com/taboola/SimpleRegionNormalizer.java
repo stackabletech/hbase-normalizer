@@ -737,12 +737,6 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return Math.max(0, parsedValue);
     }
 
-    private static double parseSplitSizeMultiplier(Configuration conf) {
-      double parsedValue = conf.getDouble(SPLIT_SIZE_MULTIPLIER_KEY, DEFAULT_SPLIT_SIZE_MULTIPLIER);
-      return Math.max(0, parsedValue);
-    }
-
-
     private static <T> void warnInvalidValue(final String key, final T parsedValue, final T settledValue) {
       LOG.warn("Configured value [" + parsedValue + "] for key [" + key + "] is invalid. Setting value to [" + settledValue + "].");
     }
