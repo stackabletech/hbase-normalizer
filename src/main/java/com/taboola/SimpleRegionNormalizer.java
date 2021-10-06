@@ -39,13 +39,12 @@ import org.apache.hadoop.hbase.RegionLoad;
 import org.apache.hadoop.hbase.ServerLoad;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Admin.MasterSwitchType;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.HTableInterface;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.master.HMaster;
@@ -144,17 +143,15 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    * Tries to find the HBase table for the Phoenix system catalog.
    * If it can't find the correct one it'll return {@code null}.
    */
-  private Table getPhoenixCatalogTable(Connection connection) throws HBaseIOException {
-    try {
-      return connection.getTable(PHOENIX_DEFAULT_CATALOG);
-    } catch (TableNotFoundException e) {
-      try {
+  private static Table getPhoenixCatalogTable(Connection connection) throws HBaseIOException {
+    try (Admin admin = connection.getAdmin()) {
+      if (admin.tableExists(PHOENIX_NAMESPACED_CATALOG)) {
         return connection.getTable(PHOENIX_NAMESPACED_CATALOG);
-      } catch (TableNotFoundException ex) {
-        return null;
-      } catch (IOException ioException) {
-        throw new HBaseIOException(ioException);
       }
+      if (admin.tableExists(PHOENIX_DEFAULT_CATALOG)) {
+        return connection.getTable(PHOENIX_DEFAULT_CATALOG);
+      }
+      return null;
     } catch (IOException e) {
       throw new HBaseIOException(e);
     }
@@ -165,33 +162,55 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    * It'll first try without a schema and then with a schema matching the namespace of the target table.
    * Will return null if it can't find anything (not an empty result).
    */
-  private Result tryFindTableInPhoenixCatalog(Table table, TableName tableName) throws HBaseIOException {
-    String target;
-    String targetName;
-    if (tableName.getNameAsString().equals("default")) {
+  private static Result tryFindTableInPhoenixCatalog(Table table, TableName tableName) throws HBaseIOException {
+    String schema = tableName.getNamespaceAsString();
+    String phoenixTableName = tableName.getQualifierAsString();
 
-
+    // This needs to handle the case where a Phoenix table is in the default HBase namespace.
+    // It can still be in a different Phoenix schema if it has a name with a dot in it and namespace mapping is disabled.
+    if (schema.equals("default")) {
+      if (phoenixTableName.contains(".")) {
+        String[] split = phoenixTableName.split("\\.");
+        if (split.length != 2) {
+          LOG.debug("Table name ([" + phoenixTableName + "]) contained more than one dot, this is illegal for a Phoenix table so we should be safe to continue");
+          return null;
+        }
+        schema = split[0];
+        phoenixTableName = split[1];
+      } else {
+        schema = null;
+      }
     }
-    if (tableName.getNameAsString().contains(".") {
-      tableName.getNameAsString().
 
+    byte[] phoenixSchemaBytes = null;
+    if (schema != null) {
+      phoenixSchemaBytes = Bytes.toBytes(schema);
     }
 
+    byte[] phoenixTableBytes = Bytes.toBytes(phoenixTableName);
+
+    // Schema for the key in the catalog table is: <tenant Id OR EMPTY>0<schema name OR EMPTY>0<table name>
+    // The schemas "hbase" and "default" can never be created (case-sensitive, e.g. "DEFAULT" is allowed)
+    // Every table in the "default" namespace will not have a schema WHEN namespace mapping is enabled, all others should have one.
+    // When namespace mapping is disabled, tables can have a schema in the "default" namespace but their name will contain a dot.
     try {
-      byte[] key = Bytes.add(new byte[] {0, 0}, tableName.getName());
+      byte[] key;
+      if (schema == null) {
+        key = Bytes.add(new byte[] {0, 0}, phoenixTableBytes);
+      } else {
+        // There is no Bytes.add method with more than three parameters, so we do it manually here
+        key = new byte[1 + phoenixSchemaBytes.length + 1 + phoenixTableBytes.length];
+        key[0] = 0;
+        System.arraycopy(phoenixSchemaBytes, 0, key, 1, phoenixSchemaBytes.length);
+        key[1 + phoenixSchemaBytes.length ] = 0;
+        System.arraycopy(phoenixTableBytes, 0, key, 1 + phoenixSchemaBytes.length + 1, phoenixTableBytes.length);
+      }
+
       Get get = new Get(key);
       Result result = table.get(get);
       if (result.isEmpty()) {
-        LOG.trace("Did NOT find information about the table [" + tableName + "] without a schema, trying again with schema matching namespace");
-        key = Bytes.add(Bytes.add(new byte[] {0}, tableName.getNamespace()), new byte[] {0}, tableName.getName());
-        get = new Get(key);
-        result = table.get(get);
-        if (result.isEmpty()) {
-          LOG.info("Did not find information about the table [" + tableName + "] in Phoenix");
-          return null;
-        } else {
-          return result;
-        }
+        LOG.trace("Did NOT find information about the table [" + tableName + "] in the Phoenix catalog");
+        return null;
       } else {
         return result;
       }
@@ -214,7 +233,36 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     return v;
   }
 
+  private boolean skipPhoenixTable(TableName table) throws HBaseIOException {
+    ClusterConnection connection = masterServices.getConnection();
+    Table phoenixTable = getPhoenixCatalogTable(connection);
+    if (phoenixTable == null) {
+      LOG.trace("Could not find table for Phoenix catalog, will assume Phoenix is not installed and continue");
+      return false;
+    }
+    LOG.trace("Found Phoenix catalog table: " + phoenixTable);
 
+    Result result = tryFindTableInPhoenixCatalog(phoenixTable, table);
+    if (result == null) {
+      LOG.debug("Table [" + table + "] does not seem to be a Phoenix table, continuing");
+      return false;
+    }
+
+    LOG.trace("Table [" + table + "] is a Phoenix table, checking for SALT_BUCKETS");
+    byte[] saltBucketBytes = result.getValue(PHOENIX_CF_BYTES, PHOENIX_SALT_BUCKETS_BYTES);
+    if (saltBucketBytes != null) {
+      int saltBuckets = decodeInt(saltBucketBytes);
+      LOG.info("Phoenix table [" + table + "] has " + saltBuckets + " salt buckets, will skip normalizing");
+      return true;
+    } else {
+      LOG.trace("Phoenix table [" + table + "] has no salt buckets, will continue");
+      return false;
+    }
+  }
+
+  /**
+   * This is the main entry point for the Normalizer.
+   */
   @Override
   public List<NormalizationPlan> computePlanForTable(TableName table) throws HBaseIOException {
     if (masterServices == null) {
@@ -223,6 +271,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     if (table == null) {
+      LOG.error("table is null, this should not happen");
       return Collections.emptyList();
     }
 
@@ -236,6 +285,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     }
 
     if (tableDescriptor == null) {
+      LOG.error("Could not retrieve table descriptor for table [" + table + "] aborting");
       return Collections.emptyList();
     }
 
@@ -247,6 +297,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return Collections.emptyList();
     }
 
+    /*
     if (normalizerConfiguration.isSkipPhoenixTables()) {
       boolean hasPhoenixCoprocessor = tableDescriptor.getCoprocessors().stream().anyMatch(s -> s.contains("org.apache.phoenix.coprocessor"));
       if (hasPhoenixCoprocessor) {
@@ -255,22 +306,10 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
 
       }
     }
-    ClusterConnection connection = masterServices.getConnection();
-    Table phoenixTable = getPhoenixCatalogTable(connection);
-    if (phoenixTable == null) {
-      LOG.warn("Could not find table for Phoenix catalog, will skip table without checking for SALT_BUCKETS, this should not happen and is probably a bug");
+     */
+
+    if (normalizerConfiguration.isSkipPhoenixTables() && skipPhoenixTable(table)) {
       return Collections.emptyList();
-    }
-    Result result = tryFindTableInPhoenixCatalog(phoenixTable, table);
-    if (result == null) {
-      LOG.warn("Could not find table [" + table + "] in Phoenix catalog, will skip table anyway, this should not happen and is probably a bug");
-      return Collections.emptyList();
-    }
-    byte[] saltBucketBytes = result.getValue(PHOENIX_CF_BYTES, PHOENIX_SALT_BUCKETS_BYTES);
-    if (saltBucketBytes != null) {
-      int saltBuckets = decodeInt(saltBucketBytes);
-      LOG.info("Phoenix table [" + table + "] has " + saltBuckets + " salt buckets, will skip normalizing");
-      return Collections.emptyList()
     }
 
     // TODO: Table exists but no SALT_BUCKET
