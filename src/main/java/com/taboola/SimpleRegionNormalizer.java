@@ -63,17 +63,26 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
 
 /**
- * Simple implementation of a region normalizer.
+ * Implementation of a region normalizer.
  *
  * It is a combination of the SimpleRegionNormalizer from CDH 5.16.2 and HBase commit 21aa553bc1d86f4d0d1dc7f47fcdcee49555e538 (from 2021-05-21).
  *
  * This normalizer can be configured by global settings in {@code hbase-site.xml} or per table using table properties.
  * Not all options can be set in both places.
  *
+ * There is extensive logging up until the {@code TRACE} level.
+ *
  * Generic options:
  * <ul>
- *   <li>{@code NORMALIZER_TARGET_REGION_COUNT} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards a target region count</li>
- *   <li>{@code NORMALIZER_TARGET_REGION_SIZE} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards an average target region size (in MB)</li>
+ *   <li>{@code NORMALIZER_TARGET_REGION_COUNT} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards a target region count.
+ *       This setting will be ignored if {@code NORMALIZER_TARGET_REGION_SIZE} is enabled.
+ *       This will modify the average region size used for all further calculations to be: {@code avgRegionSize = sumAllRegionSizes / targetRegionCount}.
+ *   </li>
+ *   <li>{@code NORMALIZER_TARGET_REGION_SIZE} (Table setting, Default: -1 = disabled): This setting can be used to steer the normalizer towards an average target region size (in MB).
+ *       If this is set, the {@code NORMALIZER_TARGET_REGION_COUNT} setting will be ignored.
+ *       This will modify the average region size used for all further calculations to be: {@code avgRegionSize = targetRegionSize}.
+ *   </li>
+ *   <li>{@code hbase.normalizer.skip.phoenix.tables} (Global setting, Default: false): When this is enabled we will check whether a candidate table for normalization is a Phoenix table AND whether it has any {@code SALT_BUCKETS} set. This detection does not rely on any Phoenix libraries and uses HBase primitives to try and find the Phoenix catalog table and the target table in it. This detection might be unreliable especially as Phoenix changes.</li>
  * </ul>
  *
  * Configuration options related to splits:
@@ -81,7 +90,7 @@ import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
  *   <li>{@code hbase.normalizer.split.enabled} (Table & Global setting, Default: true): Controls (optionally per table) whether this normalizer will ever split a region. Note that splits can be temporarily disabled cluster wide as well using a master switch.</li>
  *   <li>{@code hbase.normalizer.split.min_region_size.mb} (Table & Global setting, Default: 0): Regions smaller than this size will not be split by this normalizer</li>
  *   <li>{@code hbase.normalizer.split.min_region_age.days} (Table & Global setting, Default: 3): Only regions older than this will be split</li>
- *   <li>{@code hbase.normalizer.split.multiplier} (Table & Global setting, Default: 2): Regions will be split once they are this many times larger than the average region size</li>
+ *   <li>{@code hbase.normalizer.split.size.multiplier} (Table & Global setting, Default: 2): Regions will be split once they are this many times larger than the average region size</li>
  * </ul>
  *
  * Configuration options related to merges:
@@ -92,25 +101,44 @@ import static org.apache.hadoop.hbase.util.CollectionUtils.isEmpty;
  *   <li>{@code hbase.normalizer.merge.min_region_age.days} (Table & Global setting, Default: 3): Only regions older than this will be merged</li>
  * </ul>
  *
- * Logic in use:
+ * Generic logic in use:
  *
- *  <ol>
+ *  <ul>
  *    <li>System tables are skipped</li>
+ *    <li>Optionally: Phoenix tables with {@code SALT_BUCKETS} are skipped</li>
+ *    <li>Merges and splits can be enabled and disabled separately and normalization is skipped accordingly</li>
+ *    <li>Tables without regions are skipped</li>
  *    <li>Splits get a higher priority than merges</li>
- *    <li>If a region is smaller than</li>
- *         TODO!!!
- *  <li> get all regions of a given table
- *  <li> get avg size S of each region (by total size of store files reported in RegionLoad)
- *  <li> If biggest region is bigger than S * 2, it is kindly requested to split,
- *    and normalization stops
- *  <li> Otherwise, two smallest region R1 and its smallest neighbor R2 are kindly requested
- *    to merge, if R1 + R1 &lt;  S, and normalization stops
- *  <li> Otherwise, no action is performed
- * </ol>
+ *    <li>Both split and merge use a calculated average region size.
+ *        By default this is calculated by iterating over all regions of a table and summing up their size (in MB) but this behavior can be modified using multiple parameters:
+ *        <ul>
+ *          <li>{@code NORMALIZER_TARGET_REGION_COUNT}</li>
+ *          <li>{@code NORMALIZER_TARGET_REGION_SIZE}</li>
+ *          <li>{@code hbase.normalizer.split.size.multiplier} and {@code hbase.normalizer.merge.size.multiplier} respectively</li>
+ *        </ul>
+ *    </li>
+ *  </ul>
+ *
+ *  Split logic:
+ *  <ul>
+ *    <li>A region is skipped if its state is unknown, it is not open, it is not old (see {@code hbase.normalizer.split.min_region_age.days} or large (see {@code hbase.normalizer.split.min_region_size.mb}) enough</li>
+ *    <li>If a region is larger than the average region size times {@code hbase.normalizer.split.size.multiplier} (default: 2) it will be queued for a split</li>
+ * </ul>
+ *
+ * Merge logic:
+ * <ul>
+ *   <li>A table is skipped if it has fewer than {@code hbase.normalizer.merge.min.region.count} regions</li>
+ *   <li>The algorithm then checks pairs of neighboring regions:
+ *     <ul>
+ *       <li>A region is skipped if its state is unknown, it is not open, it is not old (see {@code hbase.normalizer.merge.min_region_age.days}) or large (see {@code hbase.normalizer.merge.min_region_size.mb}) enough</li>
+ *       <li>A region pair whose combined region size is smaller than the average region size times {@code hbase.normalizer.merge.size.multiplier} will be queued for a merge</li>
+ *       <li>A region pair with a combined region size of less than 1 MB will also always be queued for a merge</li>
+ *       <li>All other pairs will be skipped</li>
+ *     </ul>
+ *   </li>
+ * </ul>
  * <p>
- * Region sizes are coarse and approximate on the order of megabytes. Additionally,
- * "empty" regions (less than 1 MB, with the previous note) are not merged away. This
- * is by design to prevent normalization from undoing the pre-splitting of a table.
+ * Region sizes are coarse and approximate on the order of megabytes.
  */
 @InterfaceAudience.Private
 public class SimpleRegionNormalizer implements RegionNormalizer {
@@ -252,8 +280,13 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     byte[] saltBucketBytes = result.getValue(PHOENIX_CF_BYTES, PHOENIX_SALT_BUCKETS_BYTES);
     if (saltBucketBytes != null) {
       int saltBuckets = decodeInt(saltBucketBytes);
-      LOG.info("Phoenix table [" + table + "] has " + saltBuckets + " salt buckets, will skip normalizing");
-      return true;
+      if (saltBuckets > 0) {
+        LOG.info("Phoenix table [" + table + "] has " + saltBuckets + " salt buckets, will skip normalizing");
+        return true;
+      } else {
+        LOG.trace("Phoenix table [" + table + "] has no salt buckets, will continue");
+        return false;
+      }
     } else {
       LOG.trace("Phoenix table [" + table + "] has no salt buckets, will continue");
       return false;
@@ -297,22 +330,9 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
       return Collections.emptyList();
     }
 
-    /*
-    if (normalizerConfiguration.isSkipPhoenixTables()) {
-      boolean hasPhoenixCoprocessor = tableDescriptor.getCoprocessors().stream().anyMatch(s -> s.contains("org.apache.phoenix.coprocessor"));
-      if (hasPhoenixCoprocessor) {
-        LOG.info("Skipping normalizer for table [" + table + "] because it's a Phoenix table. This can be controlled using the property " + NormalizerConfiguration.NORMALIZER_SKIP_PHOENIX_TABLES);
-        return Collections.emptyList();
-
-      }
-    }
-     */
-
     if (normalizerConfiguration.isSkipPhoenixTables() && skipPhoenixTable(table)) {
       return Collections.emptyList();
     }
-
-    // TODO: Table exists but no SALT_BUCKET
 
     boolean proceedWithSplitPlanning = proceedWithSplitPlanning(tableDescriptor);
     boolean proceedWithMergePlanning = proceedWithMergePlanning(tableDescriptor);
@@ -560,7 +580,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
    */
   private static final class NormalizerConfiguration {
 
-    public static final String NORMALIZER_SKIP_PHOENIX_TABLES = "hbase.normalizer.skip.phoenix.tables";
+    private static final String NORMALIZER_SKIP_PHOENIX_TABLES = "hbase.normalizer.skip.phoenix.tables";
     private static final boolean DEFAULT_NORMALIZER_SKIP_PHOENIX_TABLES = false;
 
     // SPLIT related options
@@ -572,7 +592,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     private static final String SPLIT_MIN_REGION_SIZE_MB_KEY = "hbase.normalizer.split.min_region_size.mb";
     private static final int DEFAULT_SPLIT_MIN_REGION_SIZE_MB = 0;
 
-    private static final String SPLIT_SIZE_MULTIPLIER_KEY = "hbase.normalizer.split.multiplier";
+    private static final String SPLIT_SIZE_MULTIPLIER_KEY = "hbase.normalizer.split.size.multiplier";
     private static final double DEFAULT_SPLIT_SIZE_MULTIPLIER = 2;
 
 
@@ -588,7 +608,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
     private static final String MERGE_MIN_REGION_SIZE_MB_KEY = "hbase.normalizer.merge.min_region_size.mb";
     private static final int DEFAULT_MERGE_MIN_REGION_SIZE_MB = 0;
 
-    private static final String MERGE_SIZE_MULTIPLIER_KEY = "hbase.normalizer.merge.split.multiplier";
+    private static final String MERGE_SIZE_MULTIPLIER_KEY = "hbase.normalizer.merge.size.multiplier";
     private static final double DEFAULT_MERGE_SIZE_MULTIPLIER = 1;
 
     private final boolean skipPhoenixTables;
@@ -763,6 +783,7 @@ public class SimpleRegionNormalizer implements RegionNormalizer {
           .getAssignmentManager()
           .getRegionStates();
       tableRegions = regionStates.getRegionsOfTable(tableName);
+
       // The list of regionInfo from getRegionsOfTable() is ordered by regionName.
       // regionName does not necessary guarantee the order by STARTKEY (let's say 'aa1', 'aa1!',
       // in order by regionName, it will be 'aa1!' followed by 'aa1').
